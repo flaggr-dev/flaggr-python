@@ -45,7 +45,7 @@ class AsyncFlaggrClient:
             ``httpx.AsyncHTTPTransport(retries=2)``, or ``httpx.MockTransport`` in tests.
 
     Raises:
-        ValueError: If ``api_key`` or ``service_id`` is empty.
+        ValueError: If ``api_key``, ``service_id`` or ``environment`` is empty.
     """
 
     def __init__(
@@ -58,10 +58,8 @@ class AsyncFlaggrClient:
         timeout: float = 5.0,
         transport: Optional[httpx.AsyncBaseTransport] = None,
     ) -> None:
-        key = check_settings(api_key, service_id)
+        key, self._service_id, self._environment = check_settings(api_key, service_id, environment)
         self._api_url = api_url.rstrip("/")
-        self._service_id = service_id
-        self._environment = environment
         self._client = httpx.AsyncClient(
             transport=transport, **http_options(self._api_url, key, timeout)
         )

@@ -30,14 +30,22 @@ Number = Union[int, float]
 _NOT_FOUND_REASONS = {EvaluationReason.NOT_FOUND.value, EvaluationReason.FLAG_NOT_FOUND.value}
 
 
-def check_settings(api_key: str, service_id: str) -> str:
-    """Validate the client settings and return the API key without whitespace."""
+def check_settings(api_key: str, service_id: str, environment: str) -> tuple[str, str, str]:
+    """Validate the client settings and return them without surrounding whitespace.
+
+    Values read from environment variables often end with a newline, which the
+    API would reject.
+    """
     key = api_key.strip() if isinstance(api_key, str) else ""
     if not key:
         raise ValueError("api_key is required: a Flaggr API token")
-    if not isinstance(service_id, str) or not service_id.strip():
+    service = service_id.strip() if isinstance(service_id, str) else ""
+    if not service:
         raise ValueError("service_id is required: the ID of the service the flags belong to")
-    return key
+    env = environment.strip() if isinstance(environment, str) else ""
+    if not env:
+        raise ValueError('environment must not be empty (the default is "production")')
+    return key, service, env
 
 
 def http_options(api_url: str, api_key: str, timeout: float) -> dict[str, Any]:
@@ -67,12 +75,20 @@ def build_payload(
         "environment": environment,
         "defaultValue": default_value,
     }
-    if context:
-        # The API names the targeting key in camelCase.
-        payload["context"] = {
-            ("targetingKey" if key == "targeting_key" else key): value
-            for key, value in context.items()
-        }
+    sent: dict[str, Any] = {}
+    for name, value in (context or {}).items():
+        if value is None:
+            # An attribute set to None is left out, as if it weren't set:
+            # https://flaggr.dev rejects null attribute values.
+            continue
+        if name in ("targeting_key", "targetingKey"):
+            # The API names the targeting key in camelCase, and
+            # https://api.flaggr.dev ignores a targeting key that isn't a string.
+            sent["targetingKey"] = value if isinstance(value, str) else str(value)
+        else:
+            sent[name] = value
+    if sent:
+        payload["context"] = sent
     return payload
 
 
@@ -101,6 +117,9 @@ def parse_response(response: httpx.Response) -> dict[str, Any]:
 
 
 def _error_message(response: httpx.Response) -> str:
+    message = f"Evaluation failed: HTTP {response.status_code}"
+    if response.has_redirect_location:
+        return message + _redirect_hint(response.headers["location"])
     detail = ""
     try:
         body = response.json()
@@ -108,14 +127,22 @@ def _error_message(response: httpx.Response) -> str:
         body = None
     if isinstance(body, dict):
         detail = ": ".join(str(body[key]) for key in ("error", "message") if body.get(key))
-    if not detail:
-        detail = response.text.strip()[:200]
-    message = f"Evaluation failed: HTTP {response.status_code}"
+    if not detail and "html" not in response.headers.get("content-type", "").lower():
+        # A text body, on one line. An HTML error page would only add noise.
+        detail = " ".join(response.text.split())[:200]
     if detail:
         message += f" {detail}"
     if response.status_code == 404:
         message += f" (no evaluation endpoint at {_request_url(response)}; check api_url)"
     return message
+
+
+def _redirect_hint(location: str) -> str:
+    # The SDK doesn't follow redirects (a 301 or 302 would turn the POST into a
+    # GET), so it names the address the server points to instead.
+    if "://" in location and location.endswith(EVALUATE_PATH):
+        return f" (redirected: set api_url to {location[: -len(EVALUATE_PATH)]})"
+    return f" (redirected to {location}; check api_url)"
 
 
 def _request_url(response: httpx.Response) -> str:
@@ -198,7 +225,8 @@ def to_detail(
         elif error_code is None:
             reason = EvaluationReason.ERROR.value
             error_code = ErrorCode.TYPE_MISMATCH.value
-            error_message = f"Expected a {type_name} value, got {type(raw).__name__}"
+            article = "an" if type_name[:1] in "aeiou" else "a"
+            error_message = f"Expected {article} {type_name} value, got {type(raw).__name__}"
 
     return EvaluationDetail(
         value=value,

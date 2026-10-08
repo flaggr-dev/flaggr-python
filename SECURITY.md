@@ -10,7 +10,7 @@
 
 Please don't report security vulnerabilities in public GitHub issues.
 
-Email **security@flaggr.dev** with:
+Email **security@flaggr.dev**, or report it privately through [GitHub's private vulnerability reporting](https://github.com/flaggr-dev/flaggr-python/security/advisories/new), with:
 
 - a description of the vulnerability
 - steps to reproduce it

@@ -23,12 +23,13 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Framework :: AsyncIO",
     "Topic :: Software Development :: Libraries",
     "Typing :: Typed",
 ]
 dependencies = [
-    "httpx>=0.24.0",
+    "httpx>=0.24.0,<1",
 ]
 
 [project.optional-dependencies]
@@ -40,7 +41,7 @@ dev = [
 
 [project.urls]
 Homepage = "https://flaggr.dev"
-Documentation = "https://flaggr.dev/docs/sdk/python-sdk"
+Documentation = "https://github.com/flaggr-dev/flaggr-python#readme"
 Repository = "https://github.com/flaggr-dev/flaggr-python"
 Issues = "https://github.com/flaggr-dev/flaggr-python/issues"
 Changelog = "https://github.com/flaggr-dev/flaggr-python/releases"

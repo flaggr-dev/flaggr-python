@@ -61,6 +61,30 @@ def test_defaults_to_the_evaluation_api(recorder: Recorder) -> None:
     assert str(recorder.last.url) == "https://api.flaggr.dev/api/flags/evaluate"
 
 
+def test_cleans_the_settings_and_the_context(
+    make_async_client: MakeClient, recorder: Recorder
+) -> None:
+    recorder.reply(json=evaluation(True))
+
+    async def main() -> None:
+        async with make_async_client(
+            api_key=f" {API_KEY}\n", service_id=f"{SERVICE_ID}\n", environment="staging\n"
+        ) as client:
+            await client.get_boolean("my-flag", context={"targeting_key": 7, "email": None})
+
+    asyncio.run(main())
+    assert recorder.last.headers["Authorization"] == f"Bearer {API_KEY}"
+    assert recorder.last_body["serviceId"] == SERVICE_ID
+    assert recorder.last_body["environment"] == ENVIRONMENT
+    assert recorder.last_body["context"] == {"targetingKey": "7"}
+
+
+@pytest.mark.parametrize("settings", [{"api_key": " "}, {"service_id": ""}, {"environment": "\n"}])
+def test_requires_the_settings(make_async_client: MakeClient, settings: dict[str, str]) -> None:
+    with pytest.raises(ValueError):
+        make_async_client(**settings)
+
+
 @pytest.mark.parametrize(
     ("method", "value", "default", "expected"),
     [

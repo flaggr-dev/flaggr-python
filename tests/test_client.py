@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 import httpx
@@ -88,12 +89,63 @@ class TestRequest:
         assert str(recorder.last.url) == "https://flaggr.test/api/flags/evaluate"
         assert recorder.last.headers["Authorization"] == f"Bearer {API_KEY}"
 
+    def test_strips_the_service_and_the_environment(self, recorder: Recorder) -> None:
+        # Values read from environment variables often end with a newline.
+        recorder.reply(json=evaluation(True))
+        with FlaggrClient(
+            api_key=API_KEY,
+            service_id=f"{SERVICE_ID}\n",
+            environment=" production\n",
+            transport=httpx.MockTransport(recorder),
+        ) as client:
+            client.get_boolean("my-flag")
+
+        assert recorder.last_body["serviceId"] == SERVICE_ID
+        assert recorder.last_body["environment"] == "production"
+
     @pytest.mark.parametrize(
-        ("api_key", "service_id"), [("", SERVICE_ID), ("   ", SERVICE_ID), (API_KEY, "")]
+        ("api_key", "service_id", "environment"),
+        [
+            ("", SERVICE_ID, "production"),
+            ("   ", SERVICE_ID, "production"),
+            (API_KEY, "", "production"),
+            (API_KEY, " \n", "production"),
+            (API_KEY, SERVICE_ID, ""),
+            (API_KEY, SERVICE_ID, "\n"),
+        ],
     )
-    def test_requires_a_token_and_a_service(self, api_key: str, service_id: str) -> None:
+    def test_requires_a_token_a_service_and_an_environment(
+        self, api_key: str, service_id: str, environment: str
+    ) -> None:
         with pytest.raises(ValueError):
-            FlaggrClient(api_key=api_key, service_id=service_id)
+            FlaggrClient(api_key=api_key, service_id=service_id, environment=environment)
+
+
+class TestContext:
+    def test_stringifies_a_targeting_key_that_isnt_a_string(
+        self, client: FlaggrClient, recorder: Recorder
+    ) -> None:
+        # https://api.flaggr.dev ignores a targeting key that isn't a string.
+        recorder.reply(json=evaluation(True))
+        client.get_boolean("my-flag", context={"targeting_key": 42, "seats": 3})
+        assert recorder.last_body["context"] == {"targetingKey": "42", "seats": 3}
+
+        user_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
+        client.get_boolean("my-flag", context={"targetingKey": user_id})
+        assert recorder.last_body["context"] == {"targetingKey": str(user_id)}
+
+    def test_leaves_out_attributes_set_to_none(
+        self, client: FlaggrClient, recorder: Recorder
+    ) -> None:
+        # https://flaggr.dev rejects a context with null values.
+        recorder.reply(json=evaluation(True))
+        client.get_boolean(
+            "my-flag", context={"targeting_key": "user-1", "email": None, "beta": False}
+        )
+        assert recorder.last_body["context"] == {"targetingKey": "user-1", "beta": False}
+
+        client.get_boolean("my-flag", context={"targeting_key": None, "email": None})
+        assert "context" not in recorder.last_body
 
 
 class TestGetBoolean:
@@ -250,6 +302,15 @@ class TestResolve:
         assert detail.error_code == "TYPE_MISMATCH"
         assert detail.error_message == "Expected a boolean value, got str"
 
+    def test_an_array_is_not_an_object(self, client: FlaggrClient, recorder: Recorder) -> None:
+        # Object flags can hold a JSON array; get_object only returns JSON objects.
+        recorder.reply(json=evaluation(["a", "b"]))
+        detail = client.resolve_object("regions", default={"all": True})
+
+        assert detail.value == {"all": True}
+        assert detail.error_code == "TYPE_MISMATCH"
+        assert detail.error_message == "Expected an object value, got list"
+
 
 class TestErrors:
     def test_rejected_token(self, client: FlaggrClient, recorder: Recorder) -> None:
@@ -277,10 +338,60 @@ class TestErrors:
         assert f"{API_URL}/api/flags/evaluate" in str(caught.value)
 
     def test_server_error_with_a_text_body(self, client: FlaggrClient, recorder: Recorder) -> None:
-        recorder.reply(502, text="Bad Gateway")
-        with pytest.raises(FlaggrError, match="HTTP 502 Bad Gateway") as caught:
+        recorder.reply(502, text="Bad\n  Gateway\n")
+        with pytest.raises(FlaggrError, match="HTTP 502 Bad Gateway$") as caught:
             client.get_string("my-flag")
         assert caught.value.status_code == 502
+
+    def test_leaves_out_an_html_error_page(self, client: FlaggrClient, recorder: Recorder) -> None:
+        recorder.reply(
+            404,
+            text="<!DOCTYPE html><html><body>Not found</body></html>",
+            headers={"Content-Type": "text/html; charset=utf-8"},
+        )
+        with pytest.raises(FlaggrError) as caught:
+            client.get_boolean("my-flag")
+        assert str(caught.value) == (
+            f"Evaluation failed: HTTP 404 (no evaluation endpoint at "
+            f"{API_URL}/api/flags/evaluate; check api_url)"
+        )
+
+    @pytest.mark.parametrize(
+        ("status_code", "body", "content_type"),
+        [
+            (301, "<html><head><title>301 Moved Permanently</title></head></html>", "text/html"),
+            (308, '{"redirect": "https://flaggr.example/api/flags/evaluate"}', "text/plain"),
+        ],
+    )
+    def test_a_redirect_names_the_api_url_to_use(
+        self,
+        client: FlaggrClient,
+        recorder: Recorder,
+        status_code: int,
+        body: str,
+        content_type: str,
+    ) -> None:
+        # For example an http:// api_url, which the server redirects to https://.
+        recorder.reply(
+            status_code,
+            text=body,
+            headers={
+                "Location": "https://flaggr.example/api/flags/evaluate",
+                "Content-Type": content_type,
+            },
+        )
+        with pytest.raises(FlaggrError) as caught:
+            client.get_boolean("my-flag")
+        assert str(caught.value) == (
+            f"Evaluation failed: HTTP {status_code} "
+            "(redirected: set api_url to https://flaggr.example)"
+        )
+        assert caught.value.status_code == status_code
+
+    def test_a_redirect_elsewhere(self, client: FlaggrClient, recorder: Recorder) -> None:
+        recorder.reply(302, headers={"Location": "https://sso.example/login"})
+        with pytest.raises(FlaggrError, match=r"redirected to https://sso\.example/login; check"):
+            client.get_boolean("my-flag")
 
     @pytest.mark.parametrize("body", [b"<html>oops</html>", b"[1, 2]"])
     def test_unexpected_success_body(

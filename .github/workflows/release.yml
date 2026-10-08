@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "An existing release tag, e.g. v0.1.0"
+        description: "An existing release tag, e.g. v0.1.1"
         required: true
         type: string
 
@@ -44,6 +44,12 @@ jobs:
             echo "::error::Tag ${TAG} doesn't match the package version ${version} (flaggr/_version.py)"
             exit 1
           fi
+      - name: Test
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python -m pip install -e . pytest
+          python -m pytest -p no:cacheprovider
       - name: Build
         run: |
           python -m pip install build twine
@@ -92,6 +98,6 @@ jobs:
         with:
           name: dist
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           skip-existing: true
